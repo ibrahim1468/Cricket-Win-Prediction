@@ -3,7 +3,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from features import feature_engineering  # Your feature engineering function
+from features import feature_engineering  # your external feature function
 
 # --- Cache model loading ---
 @st.cache_resource
@@ -17,20 +17,17 @@ def load_model_features():
 model = load_model()
 model_features = load_model_features()
 
-# --- Predict function ---
 def predict_win_prob(df):
     prob = model.predict_proba(df)[0][1] * 100
-    return prob
+    # Clamp minimum probability to 1%
+    return max(prob, 1)
 
-# --- Streamlit Page Setup ---
 st.set_page_config(page_title="🏏 Cricket Chase Win Predictor", layout="wide")
 st.title("🏏 Cricket Chase Win Probability Predictor")
-st.markdown(
-    """
+st.markdown("""
 Predict the probability of winning the chase based on current match conditions.
 Use the sidebar to input match details and explore what-if scenarios.
-"""
-)
+""")
 
 # --- Sidebar Inputs ---
 st.sidebar.header("Match Inputs")
@@ -39,34 +36,34 @@ innings_runs = st.sidebar.number_input("Current Score", min_value=0, value=100, 
 innings_wickets = st.sidebar.slider("Wickets Fallen", min_value=0, max_value=10, value=2)
 target_score = st.sidebar.number_input("Target Score", min_value=1, value=200, step=1)
 
-# Runs Remaining input value computed safely here to avoid min_value issues
-default_runs_remaining = max(target_score - innings_runs, 0)
+# To avoid errors, calculate runs_remaining safely
+runs_remaining_default = max(target_score - innings_runs, 0)
 runs_remaining = st.sidebar.number_input(
-    "Runs Remaining",
-    min_value=0,
-    value=default_runs_remaining,
-    step=1,
+    "Runs Remaining", min_value=0, value=runs_remaining_default, step=1
 )
 
 balls_remaining = st.sidebar.number_input(
     "Balls Remaining", min_value=0, max_value=300, value=60, step=1
 )
 
-# --- Input Validations with Friendly Messages ---
+# Input validation with user-friendly warnings, don't crash app
+error_flag = False
 if innings_runs > target_score:
-    st.sidebar.error("⚠️ Current Score cannot be greater than Target Score. Please adjust values.")
-    st.stop()
-
+    st.sidebar.error("Current Score cannot be greater than Target Score. Please fix.")
+    error_flag = True
 if balls_remaining > 300:
-    st.sidebar.error("⚠️ Balls Remaining cannot exceed 300 (max 50 overs). Please adjust values.")
-    st.stop()
-
-if runs_remaining != max(target_score - innings_runs, 0):
+    st.sidebar.error("Balls Remaining cannot exceed 300 (max 50 overs). Please fix.")
+    error_flag = True
+if runs_remaining != runs_remaining_default:
     st.sidebar.warning(
-        f"Runs Remaining ({runs_remaining}) does not match Target - Current Score ({target_score - innings_runs})."
+        f"Runs Remaining ({runs_remaining}) does not match Target - Current Score ({runs_remaining_default})."
     )
 
-# --- Prepare Input DataFrame ---
+if error_flag:
+    st.info("Please adjust inputs to valid ranges to see predictions.")
+    st.stop()
+
+# Prepare input DataFrame
 input_dict = {
     "Innings Runs": [innings_runs],
     "Innings Wickets": [innings_wickets],
@@ -77,16 +74,14 @@ input_dict = {
 
 input_df = pd.DataFrame(input_dict)
 input_df = input_df.reindex(columns=model_features)
-
-# Feature engineering
 input_df_fe = feature_engineering(input_df)
 rrr_value = round(input_df_fe["RRR"].iloc[0], 2)
 
-# --- Prediction ---
+# Prediction
 win_prob = predict_win_prob(input_df)
 lose_prob = 100 - win_prob
 
-# --- Layout ---
+# Layout columns
 col1, col2 = st.columns([3, 2])
 
 with col1:
@@ -109,39 +104,34 @@ with col1:
 
 with col2:
     st.subheader("Match Summary 📊")
-    st.markdown(
-        f"""
+    st.markdown(f"""
 - **Current Score:** {innings_runs} 🏏  
 - **Wickets Fallen:** {innings_wickets} ⚠️  
 - **Target Score:** {target_score} 🎯  
 - **Runs Remaining:** {runs_remaining} 🔥  
 - **Balls Remaining:** {balls_remaining} ⏱️  
 - **Required Run Rate:** {rrr_value} runs per over  
-"""
-    )
+""")
     st.markdown("---")
 
-# --- Interactive What-If Scenarios ---
+# What-if scenarios
 st.subheader("📈 Explore What-If Scenarios")
-
 scenario_variable = st.selectbox(
     "Select variable to simulate changes:",
     options=["Balls Remaining", "Wickets Fallen", "Runs Remaining"],
 )
 
-# Slider ranges for scenario
 if scenario_variable == "Balls Remaining":
     var_min, var_max = 0, balls_remaining if balls_remaining > 0 else 60
 elif scenario_variable == "Wickets Fallen":
     var_min, var_max = 0, 10
 else:  # Runs Remaining
-    var_min, var_max = 0, runs_remaining if runs_remaining > 0 else target_score - innings_runs
+    var_min, var_max = 0, runs_remaining if runs_remaining > 0 else max(target_score - innings_runs, 0)
 
 var_values = st.slider(
     f"Adjust {scenario_variable} range", min_value=var_min, max_value=var_max, value=(var_min, var_max)
 )
 
-# Generate predictions over range
 x_vals = np.linspace(var_values[0], var_values[1], 50)
 probs = []
 for val in x_vals:
@@ -158,7 +148,6 @@ for val in x_vals:
     prob = predict_win_prob(test_df)
     probs.append(prob)
 
-# Plot scenario results
 fig2, ax2 = plt.subplots(figsize=(8, 4))
 ax2.plot(x_vals, probs, color="#0077FF", lw=3)
 ax2.set_title(f"Win Probability vs {scenario_variable}")
@@ -167,19 +156,20 @@ ax2.set_ylabel("Win Probability (%)")
 ax2.grid(True)
 st.pyplot(fig2)
 
-# --- Quick Insights ---
+# Quick insights
 st.subheader("💡 Quick Insights")
-if win_prob > 75:
+if win_prob > 95:
+    st.success("🏆 Strong position! Keep pushing for the win! 🔥")
+elif win_prob > 75:
     st.success("Strong position! Keep pushing 🏏🔥")
 elif win_prob > 40:
     st.info("It's a competitive chase. Every ball counts!")
-else:
+elif win_prob > 10:
     st.warning("Tough chase. The pressure is on! ⚠️")
+else:
+    st.error("Almost no chance to win, but never say never! 💪")
 
-# --- Footer ---
-st.markdown(
-    """
----
-Made with ❤️ by a cricket fanatic & data scientist.
-"""
-)
+# Footer
+st.markdown("---")
+st.markdown("Made with ❤️ by a cricket fanatic & data scientist.")
+
