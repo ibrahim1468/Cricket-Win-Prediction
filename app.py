@@ -17,10 +17,28 @@ def load_model_features():
 model = load_model()
 model_features = load_model_features()
 
+# 🔹 NEW — Adjusted prediction function with wickets + RRR penalty
 def predict_win_prob(df):
     prob = model.predict_proba(df)[0][1] * 100
-    # Clamp minimum probability to 1%
-    return max(prob, 1)
+    
+    # --- Wicket penalty ---
+    wickets_fallen = df["Innings Wickets"].iloc[0]
+    wickets_remaining = 10 - wickets_fallen
+    alpha = 1.8  # penalty steepness — tweak this
+    wicket_factor = (wickets_remaining / 10) ** alpha
+    prob *= wicket_factor
+
+    # --- Run rate pressure penalty ---
+    runs_remaining = df["Runs to Get"].iloc[0]
+    balls_remaining = df["Balls Remaining"].iloc[0]
+    if balls_remaining > 0:
+        current_rrr = (runs_remaining / balls_remaining) * 6
+        if current_rrr > 6:  # ODI high-pressure threshold
+            rr_penalty = 1 - min((current_rrr - 6) / 10, 0.8)
+            prob *= rr_penalty
+
+    # Clamp to avoid showing impossible values
+    return max(min(prob, 99.9), 0.1)
 
 st.set_page_config(page_title="🏏 Cricket Chase Win Predictor", layout="wide")
 st.title("🏏 Cricket Chase Win Probability Predictor")
@@ -46,7 +64,7 @@ balls_remaining = st.sidebar.number_input(
     "Balls Remaining", min_value=0, max_value=300, value=60, step=1
 )
 
-# Input validation with user-friendly warnings, don't crash app
+# Input validation with user-friendly warnings
 error_flag = False
 if innings_runs > target_score:
     st.sidebar.error("Current Score cannot be greater than Target Score. Please fix.")
@@ -172,4 +190,3 @@ else:
 # Footer
 st.markdown("---")
 st.markdown("Made with ❤️ by a cricket fanatic & data scientist.")
-
