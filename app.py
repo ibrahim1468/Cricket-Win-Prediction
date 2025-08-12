@@ -24,38 +24,39 @@ model_features = load_model_features()
 # =========================
 def predict_win_prob(df):
     """
-    Predict win probability using base model + calibration for wickets & RRR.
-    Returns probability in % (0.1 to 99.9).
+    Predict win probability using base model + smoother calibration for wickets & RRR.
+    Returns probability in % (1 to 99).
     """
-    base_prob = model.predict_proba(df)[0][1] * 100  # base ML output
+    base_prob = model.predict_proba(df)[0][1] * 100  # Base ML output
 
-    # --- Wickets penalty (non-linear but smooth) ---
+    # --- Wickets penalty (softer, smoother curve) ---
     wickets_fallen = df["Innings Wickets"].iloc[0]
     wickets_remaining = 10 - wickets_fallen
 
-    # Separate steepness: early vs late collapse
-    if wickets_fallen <= 5:
-        alpha = 1.3
-    else:
-        alpha = 1.6
+    # Use a single, gentler alpha for smoother decay
+    alpha = 1.1  # Reduced from 1.3/1.6 to soften penalty
     wicket_factor = (wickets_remaining / 10) ** alpha
     prob = base_prob * wicket_factor
 
-    # --- Run Rate Required penalty (smooth logistic curve) ---
+    # --- Run Rate Required penalty (softer logistic curve) ---
     runs_remaining = df["Runs to Get"].iloc[0]
     balls_remaining = df["Balls Remaining"].iloc[0]
 
     if balls_remaining > 0:
         current_rrr = (runs_remaining / balls_remaining) * 6
-        rrr_threshold = 6.0  # ODI comfort RRR
+        rrr_threshold = 7.0  # Slightly higher threshold for ODI chases
         if current_rrr > rrr_threshold:
-            # logistic decay: smoother than linear penalty
+            # Softer logistic decay: less aggressive penalty
             excess = current_rrr - rrr_threshold
-            rr_penalty = 1 / (1 + np.exp(2 * excess - 4))  # tweak scale/shift
+            rr_penalty = 1 / (1 + np.exp(0.5 * excess - 2))  # Adjusted for gentler slope
             prob *= rr_penalty
 
-    # Clamp to reasonable limits
-    return max(min(prob, 99.9), 0.1)
+    # --- Smoothing for extreme cases ---
+    # Apply logistic transformation to keep probabilities balanced
+    prob = 100 / (1 + np.exp(-0.1 * (prob - 50)))  # Centers around 50%, softens extremes
+
+    # Clamp to realistic limits
+    return max(min(prob, 99), 1)
 
 # =========================
 # Streamlit UI
@@ -109,7 +110,7 @@ input_df_fe = feature_engineering(input_df)
 rrr_value = round(input_df_fe["RRR"].iloc[0], 2)
 
 # Prediction
-win_prob = predict_win_prob(input_df)
+win_prob = predict_win_prob(input_df_fe)  # Use feature-engineered dataframe
 lose_prob = 100 - win_prob
 
 # =========================
@@ -165,7 +166,10 @@ else:
     var_min, var_max = 0, max(runs_remaining, target_score - innings_runs)
 
 var_values = st.slider(
-    f"Adjust {scenario_variable} range", min_value=var_min, max_value=var_max, value=(var_min, var_max)
+    f"Adjust {scenario_variable} range",
+    min_value=var_min,
+    max_value=var_max,
+    value=(var_min, var_max)
 )
 
 # Run simulation
@@ -174,7 +178,7 @@ probs = []
 for val in x_vals:
     sim_input = input_df.copy()
     sim_input.loc[0, scenario_variable] = val
-    sim_input = sim_input.reindex(columns=model_features)
+    sim_input = feature_engineering(sim_input.reindex(columns=model_features))
     sim_prob = predict_win_prob(sim_input)
     probs.append(sim_prob)
 
@@ -193,14 +197,14 @@ st.pyplot(fig2)
 st.subheader("💡 Quick Insights")
 if win_prob > 95:
     st.success("🏆 Dominating position! Almost certain win.")
-elif win_prob > 75:
-    st.success("Strong position! Keep pushing 🏏🔥")
-elif win_prob > 40:
-    st.info("Competitive chase. Every ball matters!")
-elif win_prob > 10:
-    st.warning("Tough chase. The pressure is on! ⚠️")
+elif win_prob > 70:  # Adjusted threshold for more realistic feedback
+    st.success("Strong position! Keep the momentum 🏏🔥")
+elif win_prob > 30:  # Widened range for competitive chases
+    st.info("Competitive chase. Every ball counts!")
+elif win_prob > 5:   # Adjusted for less harsh "tough" label
+    st.warning("Tough chase, but miracles happen! ⚠️")
 else:
-    st.error("Almost no chance to win, but cricket is full of surprises! 💪")
+    st.error("Very slim chance, but cricket loves a comeback! 💪")
 
 st.markdown("---")
 st.markdown("Made with ❤️ by a cricket fanatic & data scientist.")
