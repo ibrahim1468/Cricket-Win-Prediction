@@ -10,73 +10,53 @@ from features import feature_engineering
 # =========================
 @st.cache_resource
 def load_model():
-    try:
-        return joblib.load("best_cricket_model.pkl")
-    except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
-        return None
+    return joblib.load("best_cricket_model.pkl")
 
 @st.cache_resource
 def load_model_features():
-    try:
-        return joblib.load("model_features.pkl")
-    except Exception as e:
-        st.error(f"Error loading model features: {str(e)}")
-        return None
+    return joblib.load("model_features.pkl")
 
 model = load_model()
 model_features = load_model_features()
-
-if model is None or model_features is None:
-    st.error("Failed to load model or features. Please check the files and try again.")
-    st.stop()
 
 # =========================
 # Prediction + Calibration
 # =========================
 def predict_win_prob(df):
     """
-    Predict win probability with minimal penalties for realistic ODI scenarios.
+    Predict win probability using base model + smoother calibration for wickets & RRR.
     Returns probability in % (1 to 99).
     """
-    try:
-        base_prob = model.predict_proba(df)[0][1] * 100  # Base ML output
+    base_prob = model.predict_proba(df)[0][1] * 100  # Base ML output
 
-        # --- Wickets penalty (extremely gentle) ---
-        wickets_fallen = df["Innings Wickets"].iloc[0]
-        wickets_remaining = 10 - wickets_fallen
-        alpha = 0.5  # Minimal impact for wickets
-        wicket_factor = (wickets_remaining / 10) ** alpha
-        prob = base_prob * wicket_factor
+    # --- Wickets penalty (softer, smoother curve) ---
+    wickets_fallen = df["Innings Wickets"].iloc[0]
+    wickets_remaining = 10 - wickets_fallen
 
-        # --- RRR penalty (only for very high RRR) ---
-        runs_remaining = df["Runs to Get"].iloc[0]
-        balls_remaining = df["Balls Remaining"].iloc[0]
-        rr_penalty = 1.0  # Default: no penalty
-        if balls_remaining > 0:
-            current_rrr = (runs_remaining / balls_remaining) * 6
-            rrr_threshold = 9.0  # Skip penalty for RRR ~3.8
-            if current_rrr > rrr_threshold:
-                excess = current_rrr - rrr_threshold
-                rr_penalty = 1 / (1 + np.exp(0.2 * excess - 1.0))  # Soft slope
-                prob *= rr_penalty
+    # Use a single, gentler alpha for smoother decay
+    alpha = 1.1  # Reduced from 1.3/1.6 to soften penalty
+    wicket_factor = (wickets_remaining / 10) ** alpha
+    prob = base_prob * wicket_factor
 
-        # --- Team strength boost (e.g., for Australia) ---
-        prob *= 1.2  # Boost for strong teams
+    # --- Run Rate Required penalty (softer logistic curve) ---
+    runs_remaining = df["Runs to Get"].iloc[0]
+    balls_remaining = df["Balls Remaining"].iloc[0]
 
-        # Clamp to realistic limits
-        prob = max(min(prob, 99), 1)
+    if balls_remaining > 0:
+        current_rrr = (runs_remaining / balls_remaining) * 6
+        rrr_threshold = 7.0  # Slightly higher threshold for ODI chases
+        if current_rrr > rrr_threshold:
+            # Softer logistic decay: less aggressive penalty
+            excess = current_rrr - rrr_threshold
+            rr_penalty = 1 / (1 + np.exp(0.5 * excess - 2))  # Adjusted for gentler slope
+            prob *= rr_penalty
 
-        # Debug output
-        st.write(f"Debug: Base Prob = {base_prob:.2f}%, "
-                 f"Wicket Factor = {wicket_factor:.2f}, "
-                 f"RRR Penalty = {rr_penalty:.2f}, "
-                 f"Final Prob = {prob:.2f}%")
-        return prob
+    # --- Smoothing for extreme cases ---
+    # Apply logistic transformation to keep probabilities balanced
+    prob = 100 / (1 + np.exp(-0.1 * (prob - 50)))  # Centers around 50%, softens extremes
 
-    except Exception as e:
-        st.error(f"Prediction error: {str(e)}")
-        return 50.0  # Fallback to neutral probability
+    # Clamp to realistic limits
+    return max(min(prob, 99), 1)
 
 # =========================
 # Streamlit UI
@@ -90,16 +70,16 @@ Use the sidebar to input match details and explore what-if scenarios.
 
 # Sidebar inputs
 st.sidebar.header("Match Inputs")
-innings_runs = st.sidebar.number_input("Current Score", min_value=0, value=46, step=1)
+innings_runs = st.sidebar.number_input("Current Score", min_value=0, value=100, step=1)
 innings_wickets = st.sidebar.slider("Wickets Fallen", min_value=0, max_value=10, value=2)
-target_score = st.sidebar.number_input("Target Score", min_value=1, value=219, step=1)
+target_score = st.sidebar.number_input("Target Score", min_value=1, value=200, step=1)
 
 runs_remaining_default = max(target_score - innings_runs, 0)
 runs_remaining = st.sidebar.number_input(
     "Runs Remaining", min_value=0, value=runs_remaining_default, step=1
 )
 balls_remaining = st.sidebar.number_input(
-    "Balls Remaining", min_value=0, max_value=300, value=273, step=1
+    "Balls Remaining", min_value=0, max_value=300, value=60, step=1
 )
 
 # Validation
@@ -126,15 +106,11 @@ input_df = pd.DataFrame({
     "Balls Remaining": [balls_remaining],
 })
 input_df = input_df.reindex(columns=model_features)
-try:
-    input_df_fe = feature_engineering(input_df)
-except Exception as e:
-    st.error(f"Feature engineering error: {str(e)}")
-    st.stop()
-rrr_value = round((runs_remaining / balls_remaining * 6) if balls_remaining > 0 else 0, 2)
+input_df_fe = feature_engineering(input_df)
+rrr_value = round(input_df_fe["RRR"].iloc[0], 2)
 
 # Prediction
-win_prob = predict_win_prob(input_df_fe)
+win_prob = predict_win_prob(input_df_fe)  # Use feature-engineered dataframe
 lose_prob = 100 - win_prob
 
 # =========================
@@ -197,27 +173,23 @@ var_values = st.slider(
 )
 
 # Run simulation
-try:
-    x_vals = np.linspace(var_values[0], var_values[1], 50)
-    probs = []
-    for val in x_vals:
-        sim_input = input_df.copy()
-        sim_input.loc[0, scenario_variable] = val
-        sim_input = sim_input.reindex(columns=model_features)
-        sim_input_fe = feature_engineering(sim_input)
-        sim_prob = predict_win_prob(sim_input_fe)
-        probs.append(sim_prob)
+x_vals = np.linspace(var_values[0], var_values[1], 50)
+probs = []
+for val in x_vals:
+    sim_input = input_df.copy()
+    sim_input.loc[0, scenario_variable] = val
+    sim_input = feature_engineering(sim_input.reindex(columns=model_features))
+    sim_prob = predict_win_prob(sim_input)
+    probs.append(sim_prob)
 
-    # Plot simulation
-    fig2, ax2 = plt.subplots(figsize=(8, 4))
-    ax2.plot(x_vals, probs, color="#0077FF", lw=3)
-    ax2.set_title(f"Win Probability vs {scenario_variable}")
-    ax2.set_xlabel(scenario_variable)
-    ax2.set_ylabel("Win Probability (%)")
-    ax2.grid(True)
-    st.pyplot(fig2)
-except Exception as e:
-    st.error(f"Simulation error: {str(e)}")
+# Plot simulation
+fig2, ax2 = plt.subplots(figsize=(8, 4))
+ax2.plot(x_vals, probs, color="#0077FF", lw=3)
+ax2.set_title(f"Win Probability vs {scenario_variable}")
+ax2.set_xlabel(scenario_variable)
+ax2.set_ylabel("Win Probability (%)")
+ax2.grid(True)
+st.pyplot(fig2)
 
 # =========================
 # Insights
@@ -225,11 +197,11 @@ except Exception as e:
 st.subheader("💡 Quick Insights")
 if win_prob > 95:
     st.success("🏆 Dominating position! Almost certain win.")
-elif win_prob > 60:
+elif win_prob > 70:  # Adjusted threshold for more realistic feedback
     st.success("Strong position! Keep the momentum 🏏🔥")
-elif win_prob > 25:
+elif win_prob > 30:  # Widened range for competitive chases
     st.info("Competitive chase. Every ball counts!")
-elif win_prob > 5:
+elif win_prob > 5:   # Adjusted for less harsh "tough" label
     st.warning("Tough chase, but miracles happen! ⚠️")
 else:
     st.error("Very slim chance, but cricket loves a comeback! 💪")
